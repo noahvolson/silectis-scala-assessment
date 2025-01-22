@@ -1,6 +1,6 @@
 package com.silectis.sql.audit
 
-import com.silectis.sql.{ColumnReference, ColumnAlias, Query, QueryColumn, Subquery, TableAlias, TableReference}
+import com.silectis.sql.{ColumnAlias, ColumnExpression, ColumnReference, Query, QueryColumn, SqlFunction, Subquery, TableAlias, TableReference}
 import com.silectis.sql.parse.SqlParser
 import com.typesafe.scalalogging.LazyLogging
 
@@ -10,16 +10,29 @@ import scala.util.Try
 class QueryAuditor extends LazyLogging {
   private val parser = new SqlParser
 
-  // TODO add a couple more unit tests for getColumnNames and auditTailRec
 
   /**
-   * Remove all literal columns and extract column names
-   * @param columns the list of columns to convert
+   * Extract the string column names out of a column expression. Recursively extract function parameter columns
+   * @param expr a column expression to extract names from
    */
-  private def getColumnNames(columns: Seq[QueryColumn]): Seq[String] = {
-    columns.collect {
-      case ColumnAlias(ColumnReference(columnName), _)  => columnName
-      case ColumnReference(columnName)                  => columnName
+  private def extractColumnNames(expr: ColumnExpression): Seq[String] = {
+    expr match {
+      case ColumnReference(columnName)  => Seq(columnName)
+      case SqlFunction(_, parameters)   => parameters.flatMap(extractColumnNames) // Could have nested functions like sum(col1, avg(col2, col3))
+      case _                            => Seq.empty // Don't return literals
+    }
+  }
+
+  /**
+   * Convert a sequence of QueryColumns to a sequence of string column names
+   * @param columns the sequence of columns to convert
+   */
+  private def queryColumnsToStrings(columns: Seq[QueryColumn]): Seq[String] = {
+    columns.foldLeft(Seq.empty[String]) { (acc, column) =>
+      column match {
+        case ColumnAlias(expr, _)   => acc ++ extractColumnNames(expr)
+        case expr: ColumnExpression => acc ++ extractColumnNames(expr)
+      }
     }
   }
 
@@ -30,10 +43,10 @@ class QueryAuditor extends LazyLogging {
   @tailrec
   private def auditTailRec(query: Query): QueryAuditResult = {
     query.from match {
-      case Some(tr@TableReference(_, _))  => QueryAuditResult(Some(tr), getColumnNames(query.columns))
-      case Some(TableAlias(tr, _))        => QueryAuditResult(Some(tr), getColumnNames(query.columns))
+      case Some(tr: TableReference)       => QueryAuditResult(Some(tr), queryColumnsToStrings(query.columns))
+      case Some(TableAlias(tr, _))        => QueryAuditResult(Some(tr), queryColumnsToStrings(query.columns))
       case Some(Subquery(innerQuery, _))  => auditTailRec(innerQuery)
-      case _                              => QueryAuditResult(None,  getColumnNames(query.columns))
+      case _                              => QueryAuditResult(None,     queryColumnsToStrings(query.columns))
     }
   }
 
